@@ -94,19 +94,25 @@ def fetch_full_text(public_url: str, toc_html: str) -> str:
     """Вернуть полный markdown документа с www.consultant.ru.
 
     На www.consultant.ru документ бывает в двух формах:
-      1. Одна страница с полным текстом (кодексы, 100K+ символов).
-      2. Страница-оглавление (TOC) со ссылками на статьи (многие ФЗ/ФКЗ).
+      1. Одна страница с полным текстом (напр. ГК ч.1, КоАП — 100K+ символов).
+      2. Страница-оглавление (TOC) со ссылками на статьи (ФЗ/ФКЗ, а также
+         крупные кодексы вроде УК/НК — их TOC сам по себе огромный!).
 
-    Если страница длинная (≥ SHORT_DOC_THRESHOLD*5) — это уже полный текст.
-    Иначе ищем article-ссылки `/document/cons_doc_LAW_<BASE_ID>/<HASH>/`,
+    КЛЮЧЕВОЕ: решение принимается по объёму РЕАЛЬНОГО текста ПОСЛЕ strip_nav.
+    Большой TOC (УК = 181K) после вырезания nav-ссылок схлопывается почти в
+    ноль → значит это оглавление → нужен concat. Настоящий полный текст
+    (ГК ч.1) после strip_nav остаётся 100K+ → отдаём как есть (очищенным).
+
+    Для concat ищем article-ссылки `/document/cons_doc_LAW_<BASE_ID>/<HASH>/`,
     берём BASE_ID с наибольшим числом ссылок (он может отличаться от ID
     редакции в URL), скачиваем все статьи и конкатенируем.
-
-    Требует, чтобы caller передал HTML уже скачанной главной страницы.
     """
     toc_md = extract_markdown(toc_html)
-    if len(toc_md) >= SHORT_DOC_THRESHOLD * 5:
-        return toc_md
+    stripped = strip_nav(toc_md)
+    # Если после вырезания навигации осталось много текста — это полный
+    # документ на одной странице. Отдаём очищенную версию.
+    if len(stripped) >= SHORT_DOC_THRESHOLD * 5:
+        return stripped
 
     soup = BeautifulSoup(toc_html, 'html.parser')
     article_re = re.compile(r'^/document/cons_doc_LAW_(\d+)/[a-f0-9]{32,}/?$')

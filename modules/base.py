@@ -104,21 +104,15 @@ def fetch_full_text(public_url: str, toc_html: str) -> str:
       2. Страница-оглавление (TOC) со ссылками на статьи (ФЗ/ФКЗ, а также
          крупные кодексы вроде УК/НК — их TOC сам по себе огромный!).
 
-    КЛЮЧЕВОЕ: решение принимается по объёму РЕАЛЬНОГО текста ПОСЛЕ strip_nav.
-    Большой TOC (УК = 181K) после вырезания nav-ссылок схлопывается почти в
-    ноль → значит это оглавление → нужен concat. Настоящий полный текст
-    (ГК ч.1) после strip_nav остаётся 100K+ → отдаём как есть (очищенным).
-
-    Для concat ищем article-ссылки `/document/cons_doc_LAW_<BASE_ID>/<HASH>/`,
-    берём BASE_ID с наибольшим числом ссылок (он может отличаться от ID
-    редакции в URL), скачиваем все статьи и конкатенируем.
+    КЛЮЧЕВОЕ: решение о concat принимается по ЧИСЛУ ссылок-на-статьи, а НЕ по
+    длине текста. Длина обманчива: у КоАП/НК ч.2 преамбула («Список изменяющих
+    документов» из сотен inline-ссылок) сама по себе >90K, но текста статей в
+    ней нет. Если в TOC много article-ссылок (cons_doc_LAW_<BASE>/<HASH>) —
+    это оглавление, надо собирать статьи concat'ом, сколь угодно длинным ни был
+    бы сам TOC. Если article-ссылок мало — это уже цельный документ, отдаём
+    очищенный strip_nav-текст.
     """
     toc_md = extract_markdown(toc_html)
-    stripped = strip_nav(toc_md)
-    # Если после вырезания навигации осталось много текста — это полный
-    # документ на одной странице. Отдаём очищенную версию.
-    if len(stripped) >= SHORT_DOC_THRESHOLD * 5:
-        return stripped
 
     soup = BeautifulSoup(toc_html, 'html.parser')
     article_re = re.compile(r'^/document/cons_doc_LAW_(\d+)/[a-f0-9]{32,}/?$')
@@ -129,8 +123,9 @@ def fetch_full_text(public_url: str, toc_html: str) -> str:
             continue
         base_ids.setdefault(m.group(1), []).append(a['href'])
 
+    # Нет article-ссылок → это цельный документ, отдаём очищенный текст
     if not base_ids:
-        return toc_md
+        return strip_nav(toc_md)
 
     base_id = max(base_ids, key=lambda k: len(base_ids[k]))
     seen = set()
@@ -139,8 +134,9 @@ def fetch_full_text(public_url: str, toc_html: str) -> str:
         if path not in seen:
             seen.add(path)
             article_paths.append(path)
-    if len(article_paths) < 2:
-        return toc_md
+    # Мало ссылок-на-статьи → цельный документ (не оглавление)
+    if len(article_paths) < 5:
+        return strip_nav(toc_md)
 
     log.info(f"    TOC ({len(toc_md)} симв), base_law=LAW_{base_id}, "
              f"{len(article_paths)} статей → concat (параллельно)")

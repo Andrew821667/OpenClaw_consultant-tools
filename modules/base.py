@@ -2,10 +2,16 @@
 import re, json, time, logging, requests, html2text
 from pathlib import Path
 from datetime import datetime
+from typing import List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from config import SESSION_PATH, HEADERS
 
 log = logging.getLogger(__name__)
+
+# Число параллельных потоков при выкачке статей документа из www.consultant.ru.
+# 8 — компромисс между скоростью и нагрузкой/риском троттлинга со стороны К+.
+ARTICLE_FETCH_WORKERS = 8
 
 FOOTER_PATTERNS = [
     r'\n\s*\*\s*\[Гражданский кодекс \(ГК РФ\)\]',
@@ -137,21 +143,36 @@ def fetch_full_text(public_url: str, toc_html: str) -> str:
         return toc_md
 
     log.info(f"    TOC ({len(toc_md)} симв), base_law=LAW_{base_id}, "
-             f"{len(article_paths)} статей → concat")
-    # Заголовок документа из TOC (первые строки до списка ссылок) сохраняем,
-    # но сам TOC-список не дублируем — статьи идут подряд, очищенные от навигации.
-    parts = ['# Полный текст\n\n']
-    for i, path in enumerate(article_paths, 1):
+             f"{len(article_paths)} статей → concat (параллельно)")
+
+    # Статьи качаем ПАРАЛЛЕЛЬНО (пул потоков): один кодекс из сотен статей
+    # собирается за десятки секунд, а не за минуты. Порядок сохраняем по индексу.
+    def _fetch_article(path: str) -> str:
         r = fetch(f'https://www.consultant.ru{path}')
         if not r:
-            continue
-        article_md = strip_nav(extract_markdown(r.text))
-        if article_md:
-            parts.append(article_md)
+            return ''
+        return strip_nav(extract_markdown(r.text))
+
+    results: List[str] = [''] * len(article_paths)
+    done = 0
+    with ThreadPoolExecutor(max_workers=ARTICLE_FETCH_WORKERS) as ex:
+        future_to_idx = {ex.submit(_fetch_article, p): i
+                         for i, p in enumerate(article_paths)}
+        for fut in as_completed(future_to_idx):
+            idx = future_to_idx[fut]
+            try:
+                results[idx] = fut.result()
+            except Exception as e:
+                log.warning(f"    статья {idx} ошибка: {e}")
+            done += 1
+            if done % 50 == 0:
+                log.info(f"    …скачано {done}/{len(article_paths)} статей")
+
+    parts = ['# Полный текст\n\n']
+    for art in results:
+        if art:
+            parts.append(art)
             parts.append('\n\n')
-        if i % 20 == 0:
-            log.info(f"    …скачано {i}/{len(article_paths)} статей")
-        time.sleep(0.3)
     return ''.join(parts)
 
 

@@ -82,6 +82,24 @@ def _classify(meta: dict) -> str:
         return 'fz'
     return 'unknown'
 
+
+# Закон-поправка (не самостоятельный, правит/отменяет другие законы)
+_AMENDMENT_RE = re.compile(
+    r'о\s+внесени|о\s+признании\s+утратив|о\s+приостановлении\s+действи'
+    r'|о\s+внесени\w*\s+в\b|внесении\s+изменени',
+    re.IGNORECASE,
+)
+
+
+def _is_amendment(title: str) -> bool:
+    """Закон ли это «О внесении изменений…» (несамостоятельный).
+
+    Имя закона — в кавычках внутри полного заголовка.
+    """
+    m = re.search(r'"([^"]+)"', title or '')
+    name = m.group(1) if m else (title or '')
+    return bool(_AMENDMENT_RE.search(name))
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
@@ -407,7 +425,7 @@ def discover_federal_laws(sess: ConsultantSession, limit: Optional[int],
 
     # Scroll-harvest: чередуем сбор и скролл, пока не наберём нужное или
     # список не перестанет расти.
-    max_scrolls = 8 if limit else 400  # full-run: до 400 скроллов (~12K/30)
+    max_scrolls = 8 if limit else 2000  # full-run: до 2000 скроллов (стоп по stale)
     stale = 0
     harvest_current_page()
     for i in range(max_scrolls):
@@ -553,6 +571,41 @@ def download_one(title: str, public_url: str, force: bool = False) -> dict:
 # Main run / check / notify
 # ──────────────────────────────────────────────────────────────────────
 
+def count_substantive(only: Optional[str] = 'fz') -> dict:
+    """Полный harvest списка + классификация поправка/основной. Без скачивания.
+
+    Возвращает словарь со счётчиками и сохраняет списки в файлы:
+      ~/consultant-data/federal-laws/_count_substantive.txt (основные)
+      ~/consultant-data/federal-laws/_count_amendments.txt (поправки)
+    """
+    log.info('=' * 64)
+    log.info(f'ПОДСЧЁТ ФЗ (only={only}) — полный harvest без скачивания')
+    log.info('=' * 64)
+    with ConsultantSession(headless=True) as sess:
+        items = discover_federal_laws(sess, limit=None, only=only)
+
+    subst, amend = [], []
+    for it in items:
+        (amend if _is_amendment(it['title']) else subst).append(it)
+
+    out_dir = MD_DIR.parent if only == 'fz' else FZ_BASE
+    FZ_BASE.mkdir(parents=True, exist_ok=True)
+    (FZ_BASE / '_count_substantive.txt').write_text(
+        '\n'.join(it['title'] for it in subst), encoding='utf-8')
+    (FZ_BASE / '_count_amendments.txt').write_text(
+        '\n'.join(it['title'] for it in amend), encoding='utf-8')
+
+    log.info('─' * 50)
+    log.info(f'ВСЕГО собрано (only={only}): {len(items)}')
+    log.info(f'  ОСНОВНЫЕ (не поправки): {len(subst)}')
+    log.info(f'  Поправки/отмены:        {len(amend)}')
+    log.info(f'Списки сохранены в {FZ_BASE}/_count_*.txt')
+    log.info('Примеры основных:')
+    for it in subst[:8]:
+        log.info(f'  • {it["title"][:90]}')
+    return {'total': len(items), 'substantive': len(subst), 'amendments': len(amend)}
+
+
 def run(smoke: Optional[int], force: bool, only: Optional[str] = None) -> List[dict]:
     log.info('=' * 64)
     flt = f'only={only}, ' if only else ''
@@ -647,6 +700,8 @@ if __name__ == '__main__':
     g.add_argument('--all', action='store_true',
                    help='Полный режим: скачать все (12K+ ФЗ — ОПАСНО)')
     g.add_argument('--check', action='store_true', help='Только показать локальное состояние')
+    g.add_argument('--count', action='store_true',
+                   help='Подсчёт: полный harvest + классификация поправка/основной, без скачивания')
     parser.add_argument('--only', choices=('fz', 'fkz'),
                        help='Скачать только ФЗ или только ФКЗ (по умолчанию — оба)')
     parser.add_argument('--force', action='store_true',
@@ -656,6 +711,8 @@ if __name__ == '__main__':
 
     if args.check:
         check(); sys.exit(0)
+    if args.count:
+        count_substantive(only=args.only or 'fz'); sys.exit(0)
     if args.all:
         results = run(smoke=None, force=args.force, only=args.only)
     elif args.smoke:

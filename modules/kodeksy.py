@@ -12,7 +12,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
-from modules.base import fetch, extract_markdown, save_document, safe_fn
+from modules.base import fetch, extract_markdown, fetch_full_text, save_document, safe_fn
 from config import BASE_DIR
 
 RAW_DIR = BASE_DIR / "kodeksy" / "raw-html"
@@ -65,7 +65,7 @@ def download_one(name: str, url: str, force: bool = False) -> dict:
     resp = fetch(url)
     if not resp:
         return {"name": name, "status": "error", "error": "Не удалось загрузить"}
-    md = extract_markdown(resp.text)
+    md = fetch_full_text(url, resp.text)
     if 'доступен по расписанию' in md:
         log.warning(f"  Заблокирован: {name}")
         return {"name": name, "status": "blocked"}

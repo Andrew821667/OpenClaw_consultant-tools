@@ -43,7 +43,9 @@ from playwright.sync_api import Page, sync_playwright
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from auth.session import kill_restriction, click_exit_in_restriction  # noqa: E402
 from config import BASE_DIR  # noqa: E402
-from modules.base import fetch as base_fetch, extract_markdown, save_document  # noqa: E402
+from modules.base import (  # noqa: E402
+    fetch as base_fetch, extract_markdown, fetch_full_text, save_document,
+)
 
 ENV_PATH = Path.home() / '.config' / 'consultant' / '.env'
 SESSION_PATH = BASE_DIR / 'session.json'
@@ -482,66 +484,6 @@ def _extract_doc_markdown(html: str) -> str:
     return md.strip()
 
 
-SHORT_DOC_THRESHOLD = 8000  # ниже этого считаем что страница — только TOC
-
-
-def _fetch_full_text(public_url: str, toc_html: str) -> str:
-    """Стратегия для www.consultant.ru:
-
-    1. Скачиваем главную страницу — это может быть либо TOC (3-15K симв),
-       либо уже полный кодекс (100K+).
-    2. Парсим ВСЕ ссылки на статьи вида /document/cons_doc_LAW_<ID>/<HASH>/
-       по ЛЮБОМУ <ID> (не только текущему URL — TOC редакции часто ссылается
-       на базовый ФКЗ с другим ID).
-    3. Если статей ≥2 и сама страница короткая (< 15K) → concat.
-    4. Иначе возвращаем TOC как есть.
-    """
-    from bs4 import BeautifulSoup as BS
-    toc_md = extract_markdown(toc_html)
-
-    # Если страница большая (как кодекс с 700+ статьями в одной странице) —
-    # это уже полный текст
-    if len(toc_md) >= SHORT_DOC_THRESHOLD * 5:
-        return toc_md
-
-    # Парсим ВСЕ article-style ссылки на этой странице
-    soup = BS(toc_html, 'html.parser')
-    article_re = re.compile(r'^/document/cons_doc_LAW_(\d+)/[a-f0-9]{32,}/?$')
-    base_ids: dict = {}
-    for a in soup.find_all('a', href=True):
-        m = article_re.match(a['href'])
-        if not m:
-            continue
-        bid = m.group(1)
-        base_ids.setdefault(bid, []).append(a['href'])
-
-    if not base_ids:
-        return toc_md
-
-    # Берём БАЗОВЫЙ ID = тот, на который больше всего ссылок
-    base_id = max(base_ids, key=lambda k: len(base_ids[k]))
-    # Уникальные пути этого base_id, сохраняя порядок
-    seen = set(); article_paths = []
-    for p in base_ids[base_id]:
-        if p not in seen:
-            seen.add(p); article_paths.append(p)
-    if len(article_paths) < 2:
-        return toc_md
-
-    log.info(f'    TOC ({len(toc_md)} симв), base_law=LAW_{base_id}, {len(article_paths)} статей → concat')
-    parts = [toc_md, '\n\n---\n\n# Полный текст\n\n']
-    for i, path in enumerate(article_paths, 1):
-        r = base_fetch(f'https://www.consultant.ru{path}')
-        if not r:
-            continue
-        parts.append(extract_markdown(r.text))
-        parts.append('\n\n---\n\n')
-        if i % 20 == 0:
-            log.info(f'    …скачано {i}/{len(article_paths)} статей')
-        time.sleep(0.3)
-    return ''.join(parts)
-
-
 def download_one(title: str, public_url: str, force: bool = False) -> dict:
     """Скачать ОДИН документ ФЗ или ФКЗ через публичный www.consultant.ru.
 
@@ -574,7 +516,7 @@ def download_one(title: str, public_url: str, force: bool = False) -> dict:
     raw_path = raw_dir / f'{slug}.html'
     raw_path.write_text(resp.text, encoding='utf-8')
 
-    md = _fetch_full_text(public_url, resp.text)
+    md = fetch_full_text(public_url, resp.text)
     if 'доступен по расписанию' in md:
         log.warning(f'  Заблокирован: {title[:60]}')
         return {'title': title, 'url': public_url, 'status': 'blocked',

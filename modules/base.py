@@ -54,6 +54,101 @@ def extract_markdown(html: str) -> str:
     md = re.sub(r'\n(\s*\*\s*\[(?:Главная|Документы)\]\([^)]+\)\s*\n)+', '\n', md)
     return md.strip()
 
+# Порог: если markdown главной страницы документа короче этого — считаем что
+# это оглавление (TOC), а не полный текст, и собираем статьи отдельно.
+SHORT_DOC_THRESHOLD = 8000
+
+# Любая строка-пункт списка, целиком являющаяся ссылкой на документ
+# consultant.ru: оглавление статей, футер с кодексами, хлебные крошки.
+# Покрывает форматы: (/document/...), (//www.consultant.ru/...), (http://...).
+_NAV_LINK_RE = re.compile(
+    r'^\s*\*\s*\[[^\]]*\]\('
+    r'(?:'
+    r'(?:https?:)?//[^)]*consultant\.ru/[^)]*'   # абсолютные ссылки на КП
+    r'|/?(?:document|law)/[^)]*'                  # относительные /document/, /law/
+    r')'
+    r'\)\s*$',
+    re.IGNORECASE,
+)
+# Прочие навигационные строки
+_NAV_MISC_RE = re.compile(
+    r'^\s*\*\s*\[(?:Главная|Документы)\]', re.IGNORECASE
+)
+
+
+def strip_nav(md: str) -> str:
+    """Убрать навигационные link-списки (оглавление статей, футер с кодексами,
+    хлебные крошки), которые www.consultant.ru дублирует на каждой странице."""
+    out = []
+    for line in md.splitlines():
+        if _NAV_LINK_RE.match(line) or _NAV_MISC_RE.match(line):
+            continue
+        if line.strip() in ('Открыть полный текст документа', 'КонсультантПлюс'):
+            continue
+        out.append(line)
+    cleaned = re.sub(r'\n{3,}', '\n\n', '\n'.join(out))
+    return cleaned.strip()
+
+
+def fetch_full_text(public_url: str, toc_html: str) -> str:
+    """Вернуть полный markdown документа с www.consultant.ru.
+
+    На www.consultant.ru документ бывает в двух формах:
+      1. Одна страница с полным текстом (кодексы, 100K+ символов).
+      2. Страница-оглавление (TOC) со ссылками на статьи (многие ФЗ/ФКЗ).
+
+    Если страница длинная (≥ SHORT_DOC_THRESHOLD*5) — это уже полный текст.
+    Иначе ищем article-ссылки `/document/cons_doc_LAW_<BASE_ID>/<HASH>/`,
+    берём BASE_ID с наибольшим числом ссылок (он может отличаться от ID
+    редакции в URL), скачиваем все статьи и конкатенируем.
+
+    Требует, чтобы caller передал HTML уже скачанной главной страницы.
+    """
+    toc_md = extract_markdown(toc_html)
+    if len(toc_md) >= SHORT_DOC_THRESHOLD * 5:
+        return toc_md
+
+    soup = BeautifulSoup(toc_html, 'html.parser')
+    article_re = re.compile(r'^/document/cons_doc_LAW_(\d+)/[a-f0-9]{32,}/?$')
+    base_ids: dict = {}
+    for a in soup.find_all('a', href=True):
+        m = article_re.match(a['href'])
+        if not m:
+            continue
+        base_ids.setdefault(m.group(1), []).append(a['href'])
+
+    if not base_ids:
+        return toc_md
+
+    base_id = max(base_ids, key=lambda k: len(base_ids[k]))
+    seen = set()
+    article_paths = []
+    for path in base_ids[base_id]:
+        if path not in seen:
+            seen.add(path)
+            article_paths.append(path)
+    if len(article_paths) < 2:
+        return toc_md
+
+    log.info(f"    TOC ({len(toc_md)} симв), base_law=LAW_{base_id}, "
+             f"{len(article_paths)} статей → concat")
+    # Заголовок документа из TOC (первые строки до списка ссылок) сохраняем,
+    # но сам TOC-список не дублируем — статьи идут подряд, очищенные от навигации.
+    parts = ['# Полный текст\n\n']
+    for i, path in enumerate(article_paths, 1):
+        r = fetch(f'https://www.consultant.ru{path}')
+        if not r:
+            continue
+        article_md = strip_nav(extract_markdown(r.text))
+        if article_md:
+            parts.append(article_md)
+            parts.append('\n\n')
+        if i % 20 == 0:
+            log.info(f"    …скачано {i}/{len(article_paths)} статей")
+        time.sleep(0.3)
+    return ''.join(parts)
+
+
 def save_document(name: str, url: str, md: str, raw_dir: Path, md_dir: Path, category: str) -> dict:
     slug = safe_fn(name)
     dd = datetime.now().isoformat()

@@ -285,12 +285,15 @@ class ConsultantSession:
 # ──────────────────────────────────────────────────────────────────────
 
 def discover_federal_laws(sess: ConsultantSession, limit: Optional[int],
-                          only: Optional[str] = None) -> List[dict]:
+                          only: Optional[str] = None,
+                          skip_amendments: bool = False) -> List[dict]:
     """Пройти весь маршрут до отфильтрованного списка ФЗ и вернуть [{title, url}, …].
 
     Args:
         limit: если задан — возвращает не больше N документов после фильтрации.
         only: 'fz' / 'fkz' / None. None = оба вида.
+        skip_amendments: исключить законы-поправки («О внесении изменений…»);
+            limit тогда считается по ОСНОВНЫМ (содержательным) документам.
 
     Returns: список items, каждый с title, url, public_url, doc_id, meta, kind.
     """
@@ -416,16 +419,23 @@ def discover_federal_laws(sess: ConsultantSession, limit: Optional[int],
         except Exception:
             pass
 
+    def _match(it) -> bool:
+        if only and it['kind'] != only:
+            return False
+        if skip_amendments and _is_amendment(it['title']):
+            return False
+        return True
+
     def have_enough() -> bool:
         if not limit:
             return False
-        if only:
-            return sum(1 for it in items if it['kind'] == only) >= limit
-        return len(items) >= limit
+        return sum(1 for it in items if _match(it)) >= limit
 
     # Scroll-harvest: чередуем сбор и скролл, пока не наберём нужное или
     # список не перестанет расти.
-    max_scrolls = 8 if limit else 2000  # full-run: до 2000 скроллов (стоп по stale)
+    # При skip_amendments основных ~22%, поэтому даже smoke может потребовать
+    # много скроллов → даём больше бюджета.
+    max_scrolls = (60 if skip_amendments else 8) if limit else 2000
     stale = 0
     harvest_current_page()
     for i in range(max_scrolls):
@@ -454,6 +464,11 @@ def discover_federal_laws(sess: ConsultantSession, limit: Optional[int],
     if only:
         items = [it for it in items if it['kind'] == only]
         log.info(f'После фильтра only={only}: {len(items)}')
+
+    if skip_amendments:
+        before_n = len(items)
+        items = [it for it in items if not _is_amendment(it['title'])]
+        log.info(f'После исключения поправок: {len(items)} (отброшено {before_n - len(items)})')
 
     if limit:
         items = items[:limit]
@@ -605,16 +620,19 @@ def count_substantive(only: Optional[str] = 'fz') -> dict:
     return {'total': len(items), 'substantive': len(subst), 'amendments': len(amend)}
 
 
-def run(smoke: Optional[int], force: bool, only: Optional[str] = None) -> List[dict]:
+def run(smoke: Optional[int], force: bool, only: Optional[str] = None,
+        skip_amendments: bool = False) -> List[dict]:
     log.info('=' * 64)
     flt = f'only={only}, ' if only else ''
-    log.info(f'Федеральные законы ({flt}{"smoke=" + str(smoke) if smoke else "all"})')
+    sk = 'skip_amendments, ' if skip_amendments else ''
+    log.info(f'Федеральные законы ({flt}{sk}{"smoke=" + str(smoke) if smoke else "all"})')
     log.info('=' * 64)
 
     # Фаза 1: discovery через Playwright (нужны session-cookies + JS-навигация)
     results: List[dict] = []
     with ConsultantSession(headless=True) as sess:
-        items = discover_federal_laws(sess, limit=smoke, only=only)
+        items = discover_federal_laws(sess, limit=smoke, only=only,
+                                      skip_amendments=skip_amendments)
 
     # Фаза 2: скачивание через requests + cookies (на публичных www-URL)
     log.info(f'Найдено для выкачки: {len(items)}')
@@ -706,6 +724,8 @@ if __name__ == '__main__':
     parser.add_argument('--force', action='store_true',
                        help='Перекачать существующие')
     parser.add_argument('--notify', action='store_true', help='Отчёт в Telegram')
+    parser.add_argument('--skip-amendments', action='store_true',
+                       help='Исключить законы-поправки (качать только основные ФЗ)')
     args = parser.parse_args()
 
     if args.check:
@@ -713,9 +733,11 @@ if __name__ == '__main__':
     if args.count:
         count_substantive(only=args.only or 'fz'); sys.exit(0)
     if args.all:
-        results = run(smoke=None, force=args.force, only=args.only)
+        results = run(smoke=None, force=args.force, only=args.only,
+                      skip_amendments=args.skip_amendments)
     elif args.smoke:
-        results = run(smoke=args.smoke, force=args.force, only=args.only)
+        results = run(smoke=args.smoke, force=args.force, only=args.only,
+                      skip_amendments=args.skip_amendments)
     else:
         parser.error('Укажите --smoke N, --all или --check')
 

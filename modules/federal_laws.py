@@ -588,7 +588,6 @@ def count_substantive(only: Optional[str] = 'fz') -> dict:
     for it in items:
         (amend if _is_amendment(it['title']) else subst).append(it)
 
-    out_dir = MD_DIR.parent if only == 'fz' else FZ_BASE
     FZ_BASE.mkdir(parents=True, exist_ok=True)
     (FZ_BASE / '_count_substantive.txt').write_text(
         '\n'.join(it['title'] for it in subst), encoding='utf-8')

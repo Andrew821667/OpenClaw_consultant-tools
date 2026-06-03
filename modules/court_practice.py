@@ -99,6 +99,10 @@ def run(organ, slug, limit=0, title_filter=None):
         if limit: items = items[:limit]
         stat["found"] = len(items)
         for i, it in enumerate(items, 1):
+            target = out_md / f"{safe_fn(it['title'])[:150]}.md"
+            if target.exists():                      # резюмируемость: не качать повторно
+                stat["saved"] += 1
+                continue
             try:
                 html = fetch_doc(p, it["url"])
             except Exception as e:
@@ -114,7 +118,7 @@ def run(organ, slug, limit=0, title_filter=None):
             fm = (f"---\ntitle: {it['title']}\nsource_url: {public}\n"
                   f"date_downloaded: {datetime.now().isoformat()}\n"
                   f"category: court_practice\norgan: {organ}\n---\n\n")
-            (out_md / f"{safe_fn(it['title'])[:150]}.md").write_text(fm + f"# {it['title']}\n\n" + md, encoding="utf-8")
+            target.write_text(fm + f"# {it['title']}\n\n" + md, encoding="utf-8")
             stat["saved"] += 1
             if i % 20 == 0: log.info(f"  [{i}/{len(items)}] сохранено {stat['saved']}")
     log.info(f"ИТОГО {slug}: {json.dumps(stat, ensure_ascii=False)}")

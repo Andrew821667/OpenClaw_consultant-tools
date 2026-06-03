@@ -85,13 +85,17 @@ def fetch_doc(p, href):
     return None
 
 
-def run(organ, slug, limit=0):
+def run(organ, slug, limit=0, title_filter=None):
     out_md = BASE_DIR / "court-practice" / slug / "converted-md"
     out_md.mkdir(parents=True, exist_ok=True)
     stat = {"found": 0, "saved": 0, "stub": 0, "short": 0, "err": 0}
+    tf = re.compile(title_filter, re.I) if title_filter else None
     with ConsultantSession(headless=True) as sess:
         p, rnd = sess.page, sess.rnd
         items, total = discover(p, rnd, organ)
+        if tf:
+            items = [it for it in items if tf.search(it["title"])]
+            log.info(f"После фильтра заголовка /{title_filter}/: {len(items)}")
         if limit: items = items[:limit]
         stat["found"] = len(items)
         for i, it in enumerate(items, 1):
@@ -123,5 +127,7 @@ if __name__ == "__main__":
     ap.add_argument("--organ", required=True)
     ap.add_argument("--slug", required=True)
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--title-filter", default=None,
+                    help="regex по заголовку (напр. ^Постановление для КС)")
     a = ap.parse_args()
-    run(a.organ, a.slug, a.limit)
+    run(a.organ, a.slug, a.limit, a.title_filter)

@@ -118,7 +118,10 @@ def run(organ, slug, limit=0, title_filter=None):
             fm = (f"---\ntitle: {it['title']}\nsource_url: {public}\n"
                   f"date_downloaded: {datetime.now().isoformat()}\n"
                   f"category: court_practice\norgan: {organ}\n---\n\n")
-            target.write_text(fm + f"# {it['title']}\n\n" + md, encoding="utf-8")
+            # атомарная запись: tmp → rename (kill по окну не оставит обрезок)
+            tmp = target.with_suffix(".md.part")
+            tmp.write_text(fm + f"# {it['title']}\n\n" + md, encoding="utf-8")
+            tmp.replace(target)
             stat["saved"] += 1
             if i % 20 == 0: log.info(f"  [{i}/{len(items)}] сохранено {stat['saved']}")
     log.info(f"ИТОГО {slug}: {json.dumps(stat, ensure_ascii=False)}")
